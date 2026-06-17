@@ -1,0 +1,12 @@
+name = "FastPoisson"
+uuid = "82d35785-0431-49cd-a041-7f87398ac3f4"
+version = "0.1.0"
+authors = ["Flavien LEGER <flavienleger@users.noreply.github.com>"]
+
+[deps]
+FFTW = "7a1cc6ca-52ef-59f5-83cd-3a7055c09341"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+
+[compat]
+FFTW = "1.10.0"
+LinearAlgebra = "1.12.0"
