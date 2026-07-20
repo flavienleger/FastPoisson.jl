@@ -11,15 +11,14 @@ function run_hpc_dipole()
     println("Setting up 2D Fast Poisson Dipole Example...")
     
     # 1. Initialization parameters
-    N = 256
+    N = 1024
     dx = 1.0 / N
-    dy = 1.0 / N
     
     # ==========================================================================
     # THE HPC WAY: Pre-allocate EVERYTHING outside the hot loop
     # ==========================================================================
     # Allocate the FFTW plans and eigenvalue matrices EXACTLY ONCE
-    solver = PoissonSolver(N, dx, dy, CellCentered())
+    solver = PoissonSolver(N, dx, CellCentered())
     
     # Allocate the mutable workspace EXACTLY ONCE
     state = PoissonState(N)
