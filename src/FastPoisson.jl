@@ -48,6 +48,49 @@ struct NodeCentered end
 # ==============================================================================
 # 2. The Solver Context (Immutable Setup)
 # ==============================================================================
+
+"""
+    PoissonSolver(N1, N2, dx1, dx2, topology; flags = FFTW.MEASURE, nthreads = Threads.nthreads())
+    PoissonSolver(N, dx, topology; flags, nthreads)
+
+Build the FFTW plans and spectral eigenvalues for `-Δϕ = rhs` with mirror-Neumann
+boundaries on the given `topology` ([`CellCentered`](@ref) or
+[`NodeCentered`](@ref)).
+
+# `flags` — planning effort, and the reproducibility tradeoff
+
+`FFTW.MEASURE` (the default) chooses the transform algorithm by *timing*
+candidates. `FFTW.ESTIMATE` chooses it from a cost model, without running
+anything. The choice is a genuine tradeoff and it is deliberately a parameter
+rather than a constant, because the right answer depends entirely on the problem:
+
+* **Large grids, repeated solves, a cluster** — `MEASURE`. On big 3D transforms
+  the payoff is large and it is paid once.
+* **Reproducibility across runs** — `ESTIMATE`. `MEASURE` times candidates on a
+  machine whose timings jitter, so it does not always pick the same algorithm,
+  and different algorithms round differently. Two processes running identical
+  code can then produce results that differ in the last bits — measured in the
+  caller of this module, where the difference is amplified by a chaotic
+  iteration into the 6th significant figure. Within one process it is a
+  non-issue: FFTW caches its wisdom, so every later plan of the same shape
+  reuses the first choice.
+* **Small or moderate 2D grids** — it does not matter for speed. Measured on
+  REDFT00 at N = 129…513: identical transform times, while `MEASURE` costs
+  0.2–1.2 s of planning per call.
+
+A third option gets both: plan once with `MEASURE`, then
+`FFTW.export_wisdom(path)`, and `FFTW.import_wisdom(path)` in later runs — plan
+choice is then fixed *and* tuned. That is the right setup for a production
+cluster run.
+
+# `nthreads`
+
+Forwarded to `FFTW.set_num_threads`, which is **global FFTW state**: it affects
+every plan created afterwards anywhere in the session, not just this solver.
+The default preserves the historical behaviour (all Julia threads). Pass
+`nthreads = 1` for a single-threaded solver, or to avoid perturbing a caller
+that manages FFTW threading itself.
+"""
 struct PoissonSolver{Topology, P_Fwd, P_Inv, M <: AbstractMatrix{Float64}}
     dx1::Float64
     dx2::Float64
@@ -59,14 +102,15 @@ struct PoissonSolver{Topology, P_Fwd, P_Inv, M <: AbstractMatrix{Float64}}
 end
 
 # Constructor for the 2D Cell-Centered Rectangular Grid 
-function PoissonSolver(N1::Int, N2::Int, dx1::Float64, dx2::Float64, ::CellCentered)
+function PoissonSolver(N1::Int, N2::Int, dx1::Float64, dx2::Float64, ::CellCentered;
+                       flags = FFTW.MEASURE, nthreads::Int = Threads.nthreads())
     # FFTW requires a dummy array of the exact size and type to optimize the plan
     dummy = zeros(Float64, N1, N2)
     
     # REDFT10 is DCT-II (Forward), REDFT01 is DCT-III (Inverse)
-    FFTW.set_num_threads(Threads.nthreads())
-    dct_plan = FFTW.plan_r2r(dummy, FFTW.REDFT10, flags=FFTW.MEASURE)
-    idct_plan = FFTW.plan_r2r(dummy, FFTW.REDFT01, flags=FFTW.MEASURE)
+    FFTW.set_num_threads(nthreads)
+    dct_plan = FFTW.plan_r2r(dummy, FFTW.REDFT10, flags=flags)
+    idct_plan = FFTW.plan_r2r(dummy, FFTW.REDFT01, flags=flags)
     
     # Precompute the spectral Laplacian eigenvalues for the asymmetric grid
     eigenvalues = zeros(Float64, N1, N2)
@@ -84,16 +128,18 @@ function PoissonSolver(N1::Int, N2::Int, dx1::Float64, dx2::Float64, ::CellCente
 end
 
 # The Casual User Wrapper
-PoissonSolver(N::Int, dx::Float64, alg::CellCentered) = PoissonSolver(N, N, dx, dx, alg)
+PoissonSolver(N::Int, dx::Float64, alg::CellCentered; kw...) =
+    PoissonSolver(N, N, dx, dx, alg; kw...)
 
 # Constructor for the 2D Node-Centered Rectangular Grid
-function PoissonSolver(N1::Int, N2::Int, dx1::Float64, dx2::Float64, ::NodeCentered)
+function PoissonSolver(N1::Int, N2::Int, dx1::Float64, dx2::Float64, ::NodeCentered;
+                       flags = FFTW.MEASURE, nthreads::Int = Threads.nthreads())
     (N1 > 1 && N2 > 1) || throw(ArgumentError("A node-centered grid needs N ≥ 2 per axis; got ($N1, $N2)."))
     dummy = zeros(Float64, N1, N2)
 
     # REDFT00 is DCT-I, which is its own inverse up to the factor 4(N1-1)(N2-1)
-    FFTW.set_num_threads(Threads.nthreads())
-    dct_plan = FFTW.plan_r2r(dummy, FFTW.REDFT00, flags=FFTW.MEASURE)
+    FFTW.set_num_threads(nthreads)
+    dct_plan = FFTW.plan_r2r(dummy, FFTW.REDFT00, flags=flags)
     idct_plan = dct_plan
 
     # DCT-I modes are cos(kπ(i-1)/(N-1)), so the period is N-1, not N
@@ -114,11 +160,12 @@ end
 # power of two (measured: they differ in 20892 of 65536 entries at N=256).  The
 # grouped form is the one `analysis/rc2d_variants.jl` uses, and the RC2D
 # migration gate is bit-identity against it, so it is reproduced here exactly.
-function PoissonSolver(N::Int, dx::Float64, ::NodeCentered)
+function PoissonSolver(N::Int, dx::Float64, ::NodeCentered;
+                       flags = FFTW.MEASURE, nthreads::Int = Threads.nthreads())
     N > 1 || throw(ArgumentError("A node-centered grid needs N ≥ 2; got $N."))
     dummy = zeros(Float64, N, N)
-    FFTW.set_num_threads(Threads.nthreads())
-    dct_plan = FFTW.plan_r2r(dummy, FFTW.REDFT00, flags=FFTW.MEASURE)
+    FFTW.set_num_threads(nthreads)
+    dct_plan = FFTW.plan_r2r(dummy, FFTW.REDFT00, flags=flags)
 
     m = N - 1
     eigenvalues = zeros(Float64, N, N)
@@ -256,11 +303,11 @@ end
 Allocates the required FFTW plans and workspaces, and solves `-Δϕ = rhs`.
 Returns the potential matrix `ϕ`. 
 """
-function solve_poisson(rhs::Matrix{Float64}, dx1::Float64, dx2::Float64; alg=CellCentered())
+function solve_poisson(rhs::Matrix{Float64}, dx1::Float64, dx2::Float64; alg=CellCentered(), kw...)
     N1, N2 = size(rhs)
     
     # Allocate Engine, Workspace, and Output
-    solver = PoissonSolver(N1, N2, dx1, dx2, alg)
+    solver = PoissonSolver(N1, N2, dx1, dx2, alg; kw...)
     state = PoissonState(N1, N2)
     phi = zeros(Float64, N1, N2)
     
@@ -274,13 +321,13 @@ end
 # constructor rather than through the rectangular one, so that this and the
 # in-place API agree to the last bit (they differ otherwise — see the note on the
 # square NodeCentered constructor).
-function solve_poisson(rhs::Matrix{Float64}, dx::Float64; alg=CellCentered())
+function solve_poisson(rhs::Matrix{Float64}, dx::Float64; alg=CellCentered(), kw...)
     N1, N2 = size(rhs)
     if N1 != N2
         throw(ArgumentError("Matrix is $N1 x $N2 but only one grid step 'dx' was provided. Provide dx1 and dx2 for rectangular domains."))
     end
 
-    solver = PoissonSolver(N1, dx, alg)
+    solver = PoissonSolver(N1, dx, alg; kw...)
     state = PoissonState(N1, N1)
     phi = zeros(Float64, N1, N1)
     solve_poisson!(phi, rhs, state, solver)
